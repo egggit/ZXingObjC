@@ -24,6 +24,8 @@
  */
 @interface ZXQRCodeDecodedBitStreamParser : NSObject
 
++ (NSString *)decodeWithData:(NSData *)data version:(NSInteger)versionNumber error:(NSError **)error;
+
 + (ZXDecoderResult *)decode:(ZXByteArray *)bytes
                     version:(ZXQRCodeVersion *)version
                     ecLevel:(ZXQRCodeErrorCorrectionLevel *)ecLevel

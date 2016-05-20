@@ -39,6 +39,111 @@ const int ZX_GB2312_SUBSET = 1;
 
 @implementation ZXQRCodeDecodedBitStreamParser
 
+
++ (NSString *)decodeWithData:(NSData *)data version:(NSInteger)versionNumber error:(NSError **)error {
+    
+    ZXDecodeHints *hints = nil;
+    
+    ZXQRCodeVersion *version = [ZXQRCodeVersion versionForNumber:(int)versionNumber];
+    
+    ZXByteArray *bytes = [[ZXByteArray alloc] initWithLength:data.length];
+
+    memcpy(bytes.array, [data bytes], bytes.length * sizeof(int8_t));
+
+    ZXBitSource *bits = [[ZXBitSource alloc] initWithBytes:bytes];
+    NSMutableString *result = [NSMutableString stringWithCapacity:50];
+    NSMutableArray *byteSegments = [NSMutableArray arrayWithCapacity:1];
+    int symbolSequence = -1;
+    int parityData = -1;
+    
+    ZXCharacterSetECI *currentCharacterSetECI = nil;
+    ZXQRCodeMode *mode;
+    BOOL fc1InEffect = NO;
+    
+    do {
+        // While still another segment to read...
+        if ([bits available] < 4) {
+            // OK, assume we're done. Really, a TERMINATOR mode should have been recorded here
+            mode = [ZXQRCodeMode terminatorMode];
+        } else {
+//            NSLog(@"readbits: %i", [bits readBits:4]);
+            mode = [ZXQRCodeMode forBits:[bits readBits:4]]; // mode is encoded by 4 bits
+//            NSLog(@"1");
+            if (!mode) {
+                if (error) *error = ZXFormatErrorInstance();
+                return nil;
+            }
+        }
+        if (![mode isEqual:[ZXQRCodeMode terminatorMode]]) {
+            if ([mode isEqual:[ZXQRCodeMode fnc1FirstPositionMode]] || [mode isEqual:[ZXQRCodeMode fnc1SecondPositionMode]]) {
+                // We do little with FNC1 except alter the parsed result a bit according to the spec
+                fc1InEffect = YES;
+            } else if ([mode isEqual:[ZXQRCodeMode structuredAppendMode]]) {
+                if (bits.available < 16) {
+                    if (error) *error = ZXFormatErrorInstance();
+                    return nil;
+                }
+                // sequence number and parity is added later to the result metadata
+                // Read next 8 bits (symbol sequence #) and 8 bits (parity data), then continue
+                symbolSequence = [bits readBits:8];
+                parityData = [bits readBits:8];
+            } else if ([mode isEqual:[ZXQRCodeMode eciMode]]) {
+                // Count doesn't apply to ECI
+                int value = [self parseECIValue:bits];
+                currentCharacterSetECI = [ZXCharacterSetECI characterSetECIByValue:value];
+                if (currentCharacterSetECI == nil) {
+                    if (error) *error = ZXFormatErrorInstance();
+                    return nil;
+                }
+            } else {
+                // First handle Hanzi mode which does not start with character count
+                if ([mode isEqual:[ZXQRCodeMode hanziMode]]) {
+                    //chinese mode contains a sub set indicator right after mode indicator
+                    int subset = [bits readBits:4];
+                    int countHanzi = [bits readBits:[mode characterCountBits:version]];
+                    if (subset == ZX_GB2312_SUBSET) {
+                        if (![self decodeHanziSegment:bits result:result count:countHanzi]) {
+                            if (error) *error = ZXFormatErrorInstance();
+                            return nil;
+                        }
+                    }
+                } else {
+                    // "Normal" QR code modes:
+                    // How many characters will follow, encoded in this mode?
+                    int count = [bits readBits:[mode characterCountBits:version]];
+                    if ([mode isEqual:[ZXQRCodeMode numericMode]]) {
+                        if (![self decodeNumericSegment:bits result:result count:count]) {
+                            if (error) *error = ZXFormatErrorInstance();
+                            return nil;
+                        }
+                    } else if ([mode isEqual:[ZXQRCodeMode alphanumericMode]]) {
+                        if (![self decodeAlphanumericSegment:bits result:result count:count fc1InEffect:fc1InEffect]) {
+                            if (error) *error = ZXFormatErrorInstance();
+                            return nil;
+                        }
+                    } else if ([mode isEqual:[ZXQRCodeMode byteMode]]) {
+                        if (![self decodeByteSegment:bits result:result count:count currentCharacterSetECI:currentCharacterSetECI byteSegments:byteSegments hints:hints]) {
+                            if (error) *error = ZXFormatErrorInstance();
+                            return nil;
+                        }
+                    } else if ([mode isEqual:[ZXQRCodeMode kanjiMode]]) {
+                        if (![self decodeKanjiSegment:bits result:result count:count]) {
+                            if (error) *error = ZXFormatErrorInstance();
+                            return nil;
+                        }
+                    } else {
+                        if (error) *error = ZXFormatErrorInstance();
+                        return nil;
+                    }
+                }
+            }
+        }
+    } while (![mode isEqual:[ZXQRCodeMode terminatorMode]]);
+    
+    return result.description;
+}
+
+
 + (ZXDecoderResult *)decode:(ZXByteArray *)bytes
                     version:(ZXQRCodeVersion *)version
                     ecLevel:(ZXQRCodeErrorCorrectionLevel *)ecLevel
@@ -132,6 +237,8 @@ const int ZX_GB2312_SUBSET = 1;
     }
   } while (![mode isEqual:[ZXQRCodeMode terminatorMode]]);
 
+    
+    NSLog(@"result.description:%@", result.description);
   return [[ZXDecoderResult alloc] initWithRawBytes:bytes
                                               text:result.description
                                       byteSegments:byteSegments.count == 0 ? nil : byteSegments
